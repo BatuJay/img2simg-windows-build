@@ -11,8 +11,6 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
     
     - name: Set up MSYS2
       uses: msys2/setup-msys2@v2
@@ -22,7 +20,6 @@ jobs:
         install: >-
           mingw-w64-x86_64-gcc
           mingw-w64-x86_64-zlib
-          mingw-w64-x86_64-zlib-devel
           base-devel
     
     - name: Create build directory
@@ -32,45 +29,34 @@ jobs:
       shell: powershell
       run: |
         $files = @(
-          'img2simg.c',
-          'sparse.c', 
-          'sparse_crc32.c',
-          'sparse.h',
-          'sparse_err.h',
-          'output_file.h'
+          'img2simg.c', 'sparse.c', 'sparse_crc32.c', 'backed_block.c', 'output_file.c',
+          'sparse.h', 'sparse_err.h', 'output_file.h', 'backed_block.h', 'sparse_format.h', 'sparse_defs.h'
         )
-        
         $baseUrl = "https://raw.githubusercontent.com/android/platform_system_core/main/libsparse"
-        
         foreach ($file in $files) {
-          $url = "$baseUrl/$file"
-          $outputPath = "${{ github.workspace }}\build\$file"
-          Write-Host "Downloading $file from $url"
-          Invoke-WebRequest -Uri $url -OutFile $outputPath
-          Write-Host "Downloaded $file successfully"
+          Invoke-WebRequest -Uri "$baseUrl/$file" -OutFile "${{ github.workspace }}\build\$file"
         }
         
-        Get-ChildItem "${{ github.workspace }}\build" -Recurse
-    
+        # Windows/GCC Hatalarını Önleme Yaması (android-base/macros.h simülasyonu)
+        New-Item -Path "${{ github.workspace }}\build\android-base" -ItemType Directory -Force
+        '@
+        #ifndef ANDROID_BASE_MACROS_H
+        #define ANDROID_BASE_MACROS_H
+        #define ATTRIBUTE_UNUSED __attribute__((__unused__))
+        #endif
+        @' | Out-File "${{ github.workspace }}\build\android-base\macros.h" -Encoding ascii
+
     - name: Compile img2simg.exe with MSYS2
       shell: msys2 {0}
       run: |
         cd "${{ github.workspace }}/build"
+        # Windows üzerinde eksik olan tüm C bağımlılıklarını tek komutla derliyoruz
+        gcc -O2 -I. -o img2simg.exe img2simg.c sparse.c sparse_crc32.c backed_block.c output_file.c -lz
         
-        # Verify files exist
-        echo "Files in build directory:"
-        ls -la
-        
-        # Compile
-        gcc -v -o img2simg.exe img2simg.c sparse.c sparse_crc32.c -lz 2>&1
-        
-        # Check result
         if [ -f img2simg.exe ]; then
-          echo "✓ Compilation successful"
-          ls -lh img2simg.exe
-          file img2simg.exe
+          echo "✓ Derleme Basarili!"
         else
-          echo "✗ Compilation failed"
+          echo "✗ Derleme Başarısız"
           exit 1
         fi
     
@@ -81,24 +67,3 @@ jobs:
         name: img2simg-windows-binary
         path: ${{ github.workspace }}\build\img2simg.exe
         retention-days: 90
-        if-no-files-found: error
-    
-    - name: Create Release
-      if: success()
-      uses: softprops/action-gh-release@v2
-      with:
-        files: ${{ github.workspace }}\build\img2simg.exe
-        tag_name: build-${{ github.run_number }}
-        body: |
-          # img2simg.exe for Windows
-          
-          Compiled from AOSP libsparse
-          - Source: https://android.googlesource.com/platform/system/core/+/main/libsparse/
-          - Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          
-          **Usage:**
-          ```cmd
-          img2simg.exe input.img output.simg
-          ```
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
