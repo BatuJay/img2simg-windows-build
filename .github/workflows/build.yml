@@ -19,7 +19,6 @@ jobs:
         update: true
         install: >-
           mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-zlib
           base-devel
     
     - name: Create standalone source code
@@ -27,7 +26,6 @@ jobs:
       run: |
         mkdir -p "${{ github.workspace }}\build"
         
-        # Dışarıdan indirme yapmadan, tamamen bağımsız, Windows uyumlu tek bir mini C kodu oluşturuyoruz
         @'
         #include <stdio.h>
         #include <stdlib.h>
@@ -38,88 +36,70 @@ jobs:
         #define CHUNK_HEADER_MAGIC 0xCAC1
 
         typedef struct sparse_header {
-            uint32_t magic;
-            uint16_t major_version;
-            uint16_t minor_version;
-            uint16_t file_hdr_sz;
-            uint16_t chunk_hdr_sz;
-            uint32_t blk_sz;
-            uint32_t total_blks;
-            uint32_t total_chunks;
-            uint32_t image_checksum;
+            uint32_t magic; uint16_t major_version; uint16_t minor_version;
+            uint16_t file_hdr_sz; uint16_t chunk_hdr_sz; uint32_t blk_sz;
+            uint32_t total_blks; uint32_t total_chunks; uint32_t image_checksum;
         } sparse_header_t;
 
         typedef struct chunk_header {
-            uint16_t chunk_type;
-            uint16_t reserved1;
-            uint32_t chunk_sz;
-            uint32_t total_sz;
+            uint16_t chunk_type; uint16_t reserved1;
+            uint32_t chunk_sz; uint32_t total_sz;
         } chunk_header_t;
 
         int main(int argc, char *argv[]) {
-            if (argc < 4) {
-                printf("Kullanim: img2simg.exe <girdi_ham_imaj> <cikti_sparse_imaj> <parca_boyutu_or_400M>\n");
+            if (argc < 3) {
+                printf("Kullanim: img2simg.exe <girdi> <cikti>\n");
                 return 1;
             }
 
             FILE *in = fopen(argv[1], "rb");
-            if (!in) { perror("Girdi dosyasi acilamadi"); return 1; }
+            if (!in) { perror("Girdi acilamadi"); return 1; }
 
             FILE *out = fopen(argv[2], "wb");
-            if (!out) { perror("Cikti dosyasi olusturulamadi"); fclose(in); return 1; }
+            if (!out) { perror("Cikti acilamadi"); fclose(in); return 1; }
 
-            long long chunk_size_bytes = 400 * 1024 * 1024; // Varsayılan 400MB
-            char *size_str = argv[3];
-            long long custom_size = atoll(size_str);
-            if (custom_size > 0) {
-                if (strchr(size_str, 'M') || strchr(size_str, 'm')) chunk_size_bytes = custom_size * 1024 * 1024;
-                else if (strchr(size_str, 'G') || strchr(size_str, 'g')) chunk_size_bytes = custom_size * 1024 * 1024 * 1024;
-                else chunk_size_bytes = custom_size;
-            }
-
+            // Dosya boyutunu bul
             fseek(in, 0, SEEK_END);
             long long file_size = ftell(in);
             fseek(in, 0, SEEK_SET);
 
             uint32_t block_size = 4096;
-            long long total_blocks = (file_size + block_size - 1) / block_size;
-            long long blocks_per_chunk = chunk_size_bytes / block_size;
-            if (blocks_per_chunk <= 0) blocks_per_chunk = 1;
-            
-            uint32_t total_chunks = (total_blocks + blocks_per_chunk - 1) / blocks_per_chunk;
+            uint32_t total_blocks = (file_size + block_size - 1) / block_size;
 
+            // Tek bir ana parça (chunk) olarak tüm veriyi paketliyoruz
             sparse_header_t s_hdr = {
                 .magic = SPARSE_HEADER_MAGIC, .major_version = 1, .minor_version = 0,
-                .file_hdr_sz = sizeof(sparse_header_t), .chunk_hdr_sz = sizeof(chunk_header_t),
-                .blk_sz = block_size, .total_blks = (uint32_t)total_blocks, .total_chunks = (uint32_t)total_chunks,
-                .image_checksum = 0
+                .file_hdr_sz = 28, .chunk_hdr_sz = 12, .blk_sz = block_size,
+                .total_blks = total_blocks, .total_chunks = 1, .image_checksum = 0
             };
-            fwrite(&s_hdr, sizeof(sparse_header_t), 1, out);
+            fwrite(&s_hdr, 1, sizeof(sparse_header_t), out);
 
-            char *buffer = malloc(blocks_per_chunk * block_size);
-            long long blocks_remaining = total_blocks;
+            chunk_header_t c_hdr = {
+                .chunk_type = CHUNK_HEADER_MAGIC, .reserved1 = 0,
+                .chunk_sz = total_blocks, .total_sz = 12 + (total_blocks * block_size)
+            };
+            fwrite(&c_hdr, 1, sizeof(chunk_header_t), out);
 
-            while (blocks_remaining > 0) {
-                uint32_t current_chunk_blocks = (blocks_remaining > blocks_per_chunk) ? blocks_per_chunk : blocks_remaining;
-                uint32_t data_bytes = current_chunk_blocks * block_size;
+            // Veriyi 1 MB'lik bloklarla güvenli şekilde kopyala
+            char *buffer = malloc(1024 * 1024);
+            size_t bytes_read;
+            long long total_written = 0;
 
-                chunk_header_t c_hdr = {
-                    .chunk_type = CHUNK_HEADER_MAGIC, .reserved1 = 0,
-                    .chunk_sz = current_chunk_blocks, .total_sz = sizeof(chunk_header_t) + data_bytes
-                };
-                fwrite(&c_hdr, sizeof(chunk_header_t), 1, out);
-
-                memset(buffer, 0, data_bytes);
-                size_t read_bytes = fread(buffer, 1, data_bytes, in);
-                fwrite(buffer, 1, data_bytes, out);
-
-                blocks_remaining -= current_chunk_blocks;
+            while ((bytes_read = fread(buffer, 1, 1024 * 1024, in)) > 0) {
+                fwrite(buffer, 1, bytes_read, out);
+                total_written += bytes_read;
             }
 
-            free(buffer);
-            fclose(in);
-            fclose(out);
-            printf("Basariyla donusturuldu!\n");
+            // Eğer dosya tam 4096'nin katı değilse sonunu sıfırla doldur
+            long long padding = (total_blocks * block_size) - total_written;
+            if (padding > 0) {
+                char *pad = calloc(1, padding);
+                fwrite(pad, 1, padding, out);
+                free(pad);
+            }
+
+            free(buffer); fclose(in); fclose(out);
+            printf("Veri transferi tamamlandi. Toplam: %lld byte işlendi.\n", file_size);
             return 0;
         }
         '@ | Out-File "${{ github.workspace }}\build\img2simg.c" -Encoding ascii
@@ -133,7 +113,6 @@ jobs:
         if [ -f img2simg.exe ]; then
           echo "✓ Derleme Eksiksiz Tamamlandi!"
         else
-          echo "✗ Derleme Hatasi"
           exit 1
         fi
     
@@ -144,3 +123,4 @@ jobs:
         name: img2simg-windows-binary
         path: ${{ github.workspace }}\build\img2simg.exe
         retention-days: 90
+        
